@@ -1,0 +1,14 @@
+id: "@pomodoro/toolbar-plugin"
+
+metadata:
+  displayName: Pomodoro Bar Button
+  description: Adds a Pomodoro button to the taskbar.
+
+icon: PiTomatoFill
+target: "@seelen/fancy-toolbar"
+
+plugin:
+  template: |
+    return [icon("PiTomatoFill"), " Pomodoro"];
+  onClickV2: |-
+    trigger("@pomodoro/widget");
