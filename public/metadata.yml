@@ -13,6 +13,7 @@ icon: PiTomatoFill
 preset: Popup
 instances: Single
 lazy: false
+noMemoryLeakWorkaround: true
 
 html: !include index.html
 js: !include index.js

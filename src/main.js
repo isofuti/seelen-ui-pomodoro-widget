@@ -1,5 +1,6 @@
 import './style.css';
 import { Widget, Settings } from '@seelen-ui/lib';
+import { listen, emit } from '@tauri-apps/api/event';
 
 // Initialize the Seelen UI widget
 const appElement = document.getElementById('app');
@@ -7,7 +8,12 @@ await Widget.self.init({
   autoSizeByContent: appElement,
   normalizeDevicePixelRatio: true
 });
-await Widget.self.ready();
+await Widget.self.ready({ show: false });
+
+// Respond to Seelen UI liveness pings to prevent the widget from being reloaded/restarted
+listen('internal::liveness-ping', () => {
+  emit('internal::liveness-pong');
+});
 
 // Constants
 const CIRCUMFERENCE = 2 * Math.PI * 70; // r = 70
@@ -33,6 +39,8 @@ let secondsRemaining = 0;
 let totalDuration = 0;
 let completedPomodoros = 0;
 let targetPomodoros = 8;
+let endTime = 0;
+let pausedRemainingSeconds = 0;
 
 // Seelen UI Settings reference
 let seelenSettings = null;
@@ -46,37 +54,76 @@ let config = {
 progressCircle.style.strokeDasharray = `${CIRCUMFERENCE} ${CIRCUMFERENCE}`;
 progressCircle.style.strokeDashoffset = CIRCUMFERENCE;
 
-// Load statistics from LocalStorage
+// Load & Save State to LocalStorage (incorporating absolute timestamps)
 function getTodayDateString() {
   const today = new Date();
   return today.toISOString().split('T')[0];
 }
 
-function loadLocalStats() {
-  const todayStr = getTodayDateString();
-  const savedData = localStorage.getItem('seelen-pomodoro-stats');
-  if (savedData) {
-    try {
-      const stats = JSON.parse(savedData);
-      if (stats.date === todayStr) {
-        completedPomodoros = stats.completed || 0;
-        return;
-      }
-    } catch (e) {
-      console.error('Error parsing local stats:', e);
-    }
-  }
-  // If no stats or date is different, reset to 0
-  completedPomodoros = 0;
-  saveLocalStats();
+function saveLocalState() {
+  const state = {
+    statsDate: getTodayDateString(),
+    completedPomodoros,
+    timerState,
+    endTime,
+    pausedRemainingSeconds,
+    totalDuration
+  };
+  localStorage.setItem('seelen-pomodoro-state', JSON.stringify(state));
 }
 
-function saveLocalStats() {
-  const stats = {
-    date: getTodayDateString(),
-    completed: completedPomodoros
-  };
-  localStorage.setItem('seelen-pomodoro-stats', JSON.stringify(stats));
+function loadLocalState() {
+  const todayStr = getTodayDateString();
+  const savedData = localStorage.getItem('seelen-pomodoro-state');
+  if (savedData) {
+    try {
+      const state = JSON.parse(savedData);
+      
+      // Load daily stats (reset if it's a new day)
+      if (state.statsDate === todayStr) {
+        completedPomodoros = state.completedPomodoros || 0;
+      } else {
+        completedPomodoros = 0;
+      }
+      
+      // Load timer state
+      timerState = state.timerState || 'idle';
+      endTime = state.endTime || 0;
+      pausedRemainingSeconds = state.pausedRemainingSeconds || 0;
+      totalDuration = state.totalDuration || 0;
+
+      // Recover running state
+      if (timerState === 'focus' || timerState === 'break') {
+        const now = Date.now();
+        if (now < endTime) {
+          // Timer is still running! Recover seconds remaining and start loop
+          secondsRemaining = Math.round((endTime - now) / 1000);
+          startTimerLoop();
+        } else {
+          // Timer completed while hidden/suspended!
+          secondsRemaining = 0;
+          handleSessionComplete();
+        }
+      } else if (timerState === 'paused') {
+        secondsRemaining = pausedRemainingSeconds;
+      } else {
+        // idle
+        timerState = 'idle';
+        secondsRemaining = config['work-duration'] * 60;
+        totalDuration = secondsRemaining;
+      }
+      return;
+    } catch (e) {
+      console.error('Error parsing local state:', e);
+    }
+  }
+  
+  // Default fallback if no state
+  completedPomodoros = 0;
+  timerState = 'idle';
+  secondsRemaining = config['work-duration'] * 60;
+  totalDuration = secondsRemaining;
+  saveLocalState();
 }
 
 // Request Notification permissions
@@ -227,16 +274,20 @@ function togglePlayPause() {
     timerState = 'focus';
     totalDuration = config['work-duration'] * 60;
     secondsRemaining = totalDuration;
+    endTime = Date.now() + secondsRemaining * 1000;
     startTimerLoop();
   } else if (timerState === 'paused') {
     // Resume session
     timerState = secondsRemaining > 0 && totalDuration === config['break-duration'] * 60 ? 'break' : 'focus';
+    endTime = Date.now() + secondsRemaining * 1000;
     startTimerLoop();
   } else if (timerState === 'focus' || timerState === 'break') {
     // Pause session
     timerState = 'paused';
+    pausedRemainingSeconds = secondsRemaining;
     stopTimerInterval();
   }
+  saveLocalState();
   updateDisplay();
   renderDots();
 }
@@ -246,15 +297,17 @@ function startTimerLoop() {
   stopTimerInterval();
   
   timerInterval = setInterval(() => {
-    if (secondsRemaining > 0) {
-      secondsRemaining--;
+    const now = Date.now();
+    if (now < endTime) {
+      secondsRemaining = Math.max(0, Math.round((endTime - now) / 1000));
       const percent = (secondsRemaining / totalDuration) * 100;
       setProgress(percent);
       timeDisplay.innerText = formatTime(secondsRemaining);
     } else {
+      secondsRemaining = 0;
       handleSessionComplete();
     }
-  }, 1000);
+  }, 200); // Check 5 times per second for smooth updates and precision
 }
 
 // Handle completion of a work or break session
@@ -264,7 +317,6 @@ function handleSessionComplete() {
   
   if (timerState === 'focus') {
     completedPomodoros++;
-    saveLocalStats();
     
     sendNotification('🍅 Time to rest!', 'Great job! You have completed a work session. Time for a short break.');
     
@@ -272,6 +324,7 @@ function handleSessionComplete() {
     timerState = 'break';
     totalDuration = config['break-duration'] * 60;
     secondsRemaining = totalDuration;
+    endTime = Date.now() + secondsRemaining * 1000;
     startTimerLoop();
   } else if (timerState === 'break') {
     sendNotification('💪 Back to work!', 'Break is over. Ready to focus again?');
@@ -281,6 +334,7 @@ function handleSessionComplete() {
     setProgress(100);
   }
   
+  saveLocalState();
   updateDisplay();
   renderDots();
 }
@@ -291,7 +345,10 @@ function resetTimer() {
   timerState = 'idle';
   totalDuration = config['work-duration'] * 60;
   secondsRemaining = totalDuration;
+  endTime = 0;
+  pausedRemainingSeconds = 0;
   setProgress(100);
+  saveLocalState();
   updateDisplay();
   renderDots();
 }
@@ -304,12 +361,16 @@ function skipSession() {
     timerState = 'break';
     totalDuration = config['break-duration'] * 60;
     secondsRemaining = totalDuration;
+    endTime = Date.now() + secondsRemaining * 1000;
     startTimerLoop();
   } else if (timerState === 'break' || timerState === 'paused' || timerState === 'idle') {
     // Skip break/paused back to idle
     timerState = 'idle';
+    endTime = 0;
+    pausedRemainingSeconds = 0;
     setProgress(100);
   }
+  saveLocalState();
   updateDisplay();
   renderDots();
 }
@@ -321,6 +382,7 @@ async function adjustTarget(amount) {
     targetPomodoros = newTarget;
     targetCountEl.innerText = targetPomodoros;
     renderDots();
+    saveLocalState();
     
     // Update and write settings back to Seelen UI
     if (seelenSettings) {
@@ -346,7 +408,6 @@ function applyConfig(newConfig) {
   
   const oldWork = config['work-duration'];
   const oldBreak = config['break-duration'];
-  const oldTarget = config['target-pomodoros'];
 
   config = { ...config, ...newConfig };
   
@@ -358,18 +419,33 @@ function applyConfig(newConfig) {
     secondsRemaining = config['work-duration'] * 60;
     totalDuration = secondsRemaining;
   } else if (timerState === 'paused') {
-    // If durations changed while paused, optionally adjust remaining seconds proportionally
+    // If durations changed while paused, adjust remaining seconds
     if (oldWork !== config['work-duration'] && totalDuration === oldWork * 60) {
       const ratio = secondsRemaining / (oldWork * 60);
       totalDuration = config['work-duration'] * 60;
       secondsRemaining = Math.round(totalDuration * ratio);
+      pausedRemainingSeconds = secondsRemaining;
     } else if (oldBreak !== config['break-duration'] && totalDuration === oldBreak * 60) {
       const ratio = secondsRemaining / (oldBreak * 60);
       totalDuration = config['break-duration'] * 60;
       secondsRemaining = Math.round(totalDuration * ratio);
+      pausedRemainingSeconds = secondsRemaining;
+    }
+  } else if (timerState === 'focus' || timerState === 'break') {
+    // If durations changed while running, adjust endTime dynamically
+    const currentPassed = totalDuration - secondsRemaining;
+    if (timerState === 'focus' && oldWork !== config['work-duration']) {
+      totalDuration = config['work-duration'] * 60;
+      secondsRemaining = Math.max(0, totalDuration - currentPassed);
+      endTime = Date.now() + secondsRemaining * 1000;
+    } else if (timerState === 'break' && oldBreak !== config['break-duration']) {
+      totalDuration = config['break-duration'] * 60;
+      secondsRemaining = Math.max(0, totalDuration - currentPassed);
+      endTime = Date.now() + secondsRemaining * 1000;
     }
   }
 
+  saveLocalState();
   updateDisplay();
   renderDots();
 }
@@ -388,15 +464,15 @@ async function setupSeelenSettings() {
 
     // Apply initial settings
     const initialConfig = seelenSettings.getCurrentWidgetConfig();
-    applyConfig(initialConfig);
+    config = { ...config, ...initialConfig };
+    targetPomodoros = config['target-pomodoros'] || 8;
+    targetCountEl.innerText = targetPomodoros;
+    
+    // Load local state (restoring running timer status if it exists)
+    loadLocalState();
   } catch (e) {
     console.error('Could not connect to Seelen UI settings API, using offline config.', e);
-    // Offline mode: load stats at least
-    targetCountEl.innerText = targetPomodoros;
-    secondsRemaining = config['work-duration'] * 60;
-    totalDuration = secondsRemaining;
-    updateDisplay();
-    renderDots();
+    loadLocalState();
   }
 }
 
@@ -408,5 +484,4 @@ targetMinusBtn.addEventListener('click', () => adjustTarget(-1));
 targetPlusBtn.addEventListener('click', () => adjustTarget(1));
 
 // Initialize State and Settings
-loadLocalStats();
 setupSeelenSettings();
