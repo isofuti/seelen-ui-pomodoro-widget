@@ -1,6 +1,7 @@
 import './style.css';
 import { Widget, Settings } from '@seelen-ui/lib';
 import { listen, emit } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 
 // Initialize the Seelen UI widget
 const appElement = document.getElementById('app');
@@ -18,7 +19,15 @@ listen('internal::liveness-ping', () => {
 // Constants
 const CIRCUMFERENCE = 2 * Math.PI * 70; // r = 70
 
-// DOM Elements
+// DOM Elements - Tabs
+const tabTimerBtn = document.getElementById('tab-timer-btn');
+const tabTasksBtn = document.getElementById('tab-tasks-btn');
+const tabStatsBtn = document.getElementById('tab-stats-btn');
+const timerTabContent = document.getElementById('timer-tab-content');
+const tasksTabContent = document.getElementById('tasks-tab-content');
+const statsTabContent = document.getElementById('stats-tab-content');
+
+// DOM Elements - Timer
 const timeDisplay = document.getElementById('time-display');
 const statusDisplay = document.getElementById('status-display');
 const stateBadge = document.getElementById('state-badge');
@@ -26,13 +35,32 @@ const playPauseBtn = document.getElementById('play-pause-btn');
 const resetBtn = document.getElementById('reset-btn');
 const skipBtn = document.getElementById('skip-btn');
 const progressCircle = document.getElementById('progress-circle');
+const activeTaskDisplay = document.getElementById('active-task-display');
+
+// DOM Elements - Tasks Tab
+const taskInput = document.getElementById('task-input');
+const estCountEl = document.getElementById('est-count');
+const estMinusBtn = document.getElementById('est-minus');
+const estPlusBtn = document.getElementById('est-plus');
+const addTaskBtn = document.getElementById('add-task-btn');
+const taskListEl = document.getElementById('task-list');
+
+// DOM Elements - Stats Tab
+const statFocusTime = document.getElementById('stat-focus-time');
+const statCompletedSessions = document.getElementById('stat-completed-sessions');
+const statSuccessRate = document.getElementById('stat-success-rate');
+const weeklyBarChart = document.getElementById('weekly-bar-chart');
+const sessionLogList = document.getElementById('session-log-list');
+const clearLogBtn = document.getElementById('clear-log-btn');
+
+// DOM Elements - Shared Stats Footer
 const targetCountEl = document.getElementById('target-count');
 const dotsGrid = document.getElementById('dots-grid');
 const statsSummary = document.getElementById('stats-summary');
 const targetMinusBtn = document.getElementById('target-minus');
 const targetPlusBtn = document.getElementById('target-plus');
 
-// State Variables
+// Timer State Variables
 let timerInterval = null;
 let timerState = 'idle'; // 'idle', 'focus', 'break', 'paused'
 let secondsRemaining = 0;
@@ -41,6 +69,14 @@ let completedPomodoros = 0;
 let targetPomodoros = 8;
 let endTime = 0;
 let pausedRemainingSeconds = 0;
+
+// Task State Variables
+let tasks = [];
+let activeTaskId = null;
+let formEstimateCount = 1;
+
+// Session State Variables
+let sessions = [];
 
 // Seelen UI Settings reference
 let seelenSettings = null;
@@ -54,7 +90,84 @@ let config = {
 progressCircle.style.strokeDasharray = `${CIRCUMFERENCE} ${CIRCUMFERENCE}`;
 progressCircle.style.strokeDashoffset = CIRCUMFERENCE;
 
-// Load & Save State to LocalStorage (incorporating absolute timestamps)
+// --- Tab Switching Logic ---
+function switchTab(targetTab) {
+  tabTimerBtn.classList.remove('active');
+  tabTasksBtn.classList.remove('active');
+  tabStatsBtn.classList.remove('active');
+  timerTabContent.classList.remove('active');
+  tasksTabContent.classList.remove('active');
+  statsTabContent.classList.remove('active');
+
+  if (targetTab === 'timer') {
+    tabTimerBtn.classList.add('active');
+    timerTabContent.classList.add('active');
+  } else if (targetTab === 'tasks') {
+    tabTasksBtn.classList.add('active');
+    tasksTabContent.classList.add('active');
+  } else if (targetTab === 'stats') {
+    tabStatsBtn.classList.add('active');
+    statsTabContent.classList.add('active');
+    updateAnalyticsAndRender();
+  }
+}
+
+tabTimerBtn.addEventListener('click', () => switchTab('timer'));
+tabTasksBtn.addEventListener('click', () => switchTab('tasks'));
+tabStatsBtn.addEventListener('click', () => switchTab('stats'));
+
+// --- File-Based Persistence (tasks.json) ---
+async function saveTasksToFile() {
+  const data = {
+    tasks,
+    activeTaskId
+  };
+  try {
+    await invoke('write_data_file', { filename: 'tasks.json', content: JSON.stringify(data) });
+  } catch (e) {
+    console.error('Failed to write tasks.json:', e);
+  }
+}
+
+async function loadTasksFromFile() {
+  try {
+    const content = await invoke('read_data_file', { filename: 'tasks.json' });
+    if (content) {
+      const data = JSON.parse(content);
+      tasks = data.tasks || [];
+      activeTaskId = data.activeTaskId || null;
+    }
+  } catch (e) {
+    console.warn('tasks.json not found, initializing empty list.');
+    tasks = [];
+    activeTaskId = null;
+  }
+}
+
+// --- File-Based Persistence (sessions.json) ---
+async function saveSessionsToFile() {
+  const data = { sessions };
+  try {
+    await invoke('write_data_file', { filename: 'sessions.json', content: JSON.stringify(data) });
+  } catch (e) {
+    console.error('Failed to write sessions.json:', e);
+  }
+}
+
+async function loadSessionsFromFile() {
+  try {
+    const content = await invoke('read_data_file', { filename: 'sessions.json' });
+    if (content) {
+      const data = JSON.parse(content);
+      sessions = data.sessions || [];
+    }
+  } catch (e) {
+    console.warn('sessions.json not found, initializing empty sessions list.');
+    sessions = [];
+  }
+}
+
+// --- Load & Save State to LocalStorage ---
 function getTodayDateString() {
   const today = new Date();
   return today.toISOString().split('T')[0];
@@ -96,18 +209,15 @@ function loadLocalState() {
       if (timerState === 'focus' || timerState === 'break') {
         const now = Date.now();
         if (now < endTime) {
-          // Timer is still running! Recover seconds remaining and start loop
           secondsRemaining = Math.round((endTime - now) / 1000);
           startTimerLoop();
         } else {
-          // Timer completed while hidden/suspended!
           secondsRemaining = 0;
           handleSessionComplete();
         }
       } else if (timerState === 'paused') {
         secondsRemaining = pausedRemainingSeconds;
       } else {
-        // idle
         timerState = 'idle';
         secondsRemaining = config['work-duration'] * 60;
         totalDuration = secondsRemaining;
@@ -118,7 +228,6 @@ function loadLocalState() {
     }
   }
   
-  // Default fallback if no state
   completedPomodoros = 0;
   timerState = 'idle';
   secondsRemaining = config['work-duration'] * 60;
@@ -126,14 +235,158 @@ function loadLocalState() {
   saveLocalState();
 }
 
-// Request Notification permissions
+// --- Task Helper Functions & CRUD ---
+function generateId() {
+  return 'task-' + Math.random().toString(36).substr(2, 9) + '-' + Date.now().toString(36);
+}
+
+function addTask() {
+  const title = taskInput.value.trim();
+  if (!title) return;
+
+  const newTask = {
+    id: generateId(),
+    title,
+    estimated: formEstimateCount,
+    completed: 0,
+    done: false,
+    createdAt: Date.now()
+  };
+
+  tasks.push(newTask);
+  
+  // If no task is active, make this the active task
+  if (activeTaskId === null) {
+    activeTaskId = newTask.id;
+  }
+
+  taskInput.value = '';
+  formEstimateCount = 1;
+  estCountEl.innerText = formEstimateCount;
+
+  saveTasksToFile();
+  renderTaskList();
+  updateDisplay();
+  renderDots();
+}
+
+function deleteTask(id, e) {
+  if (e) e.stopPropagation(); // Prevent toggling active state when deleting
+  tasks = tasks.filter(t => t.id !== id);
+  if (activeTaskId === id) {
+    activeTaskId = tasks.length > 0 ? tasks[0].id : null;
+  }
+  saveTasksToFile();
+  renderTaskList();
+  updateDisplay();
+  renderDots();
+}
+
+function toggleTaskDone(id, done, e) {
+  if (e) e.stopPropagation();
+  const task = tasks.find(t => t.id === id);
+  if (task) {
+    task.done = done;
+    saveTasksToFile();
+    renderTaskList();
+  }
+}
+
+function selectActiveTask(id) {
+  const task = tasks.find(t => t.id === id);
+  if (!task || task.done) return; // Don't allow completed tasks to be active
+
+  activeTaskId = activeTaskId === id ? null : id; // Toggle active
+  saveTasksToFile();
+  renderTaskList();
+  updateDisplay();
+  renderDots();
+}
+
+function renderTaskList() {
+  taskListEl.innerHTML = '';
+  if (tasks.length === 0) {
+    taskListEl.innerHTML = '<div style="text-align:center;font-size:11px;color:var(--text-secondary);padding:20px 0;">No tasks yet. Create one above!</div>';
+    return;
+  }
+
+  // Sort tasks: undone first, then done, ordered by creation date
+  const sortedTasks = [...tasks].sort((a, b) => {
+    if (a.done !== b.done) return a.done ? 1 : -1;
+    return a.createdAt - b.createdAt;
+  });
+
+  sortedTasks.forEach(task => {
+    const card = document.createElement('div');
+    card.className = `task-item ${task.done ? 'completed-task' : ''} ${task.id === activeTaskId ? 'active-task-highlight' : ''}`;
+    
+    // Checkbox container
+    const checkboxContainer = document.createElement('div');
+    checkboxContainer.className = 'task-checkbox-container';
+    
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'task-checkbox';
+    checkbox.checked = task.done;
+    checkbox.addEventListener('change', (e) => toggleTaskDone(task.id, checkbox.checked, e));
+    checkboxContainer.appendChild(checkbox);
+    
+    // Details
+    const details = document.createElement('div');
+    details.className = 'task-details';
+    
+    const title = document.createElement('span');
+    title.className = 'task-item-title';
+    title.innerText = task.title;
+    title.title = task.title;
+    details.appendChild(title);
+    
+    const estimate = document.createElement('span');
+    estimate.className = 'task-item-estimate';
+    estimate.innerHTML = `<span>${task.completed} / ${task.estimated}</span> 🍅`;
+    
+    if (task.id === activeTaskId) {
+      const activeBadge = document.createElement('span');
+      activeBadge.className = 'task-active-badge';
+      activeBadge.innerText = ' • Active';
+      estimate.appendChild(activeBadge);
+    }
+    details.appendChild(estimate);
+
+    // Delete Action
+    const actions = document.createElement('div');
+    actions.className = 'task-actions';
+    
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'task-btn-delete';
+    deleteBtn.innerHTML = '🗑';
+    deleteBtn.title = 'Delete task';
+    deleteBtn.addEventListener('click', (e) => deleteTask(task.id, e));
+    actions.appendChild(deleteBtn);
+
+    card.appendChild(checkboxContainer);
+    card.appendChild(details);
+    card.appendChild(actions);
+
+    // Clicking the card sets it as active
+    card.addEventListener('click', () => selectActiveTask(task.id));
+
+    taskListEl.appendChild(card);
+  });
+}
+
+function adjustFormEstimate(amount) {
+  formEstimateCount = Math.max(1, Math.min(10, formEstimateCount + amount));
+  estCountEl.innerText = formEstimateCount;
+}
+
+// --- Notifications ---
 if ('Notification' in window) {
   if (Notification.permission !== 'granted' && Notification.permission !== 'denied') {
     Notification.requestPermission();
   }
 }
 
-// Send OS Notification
 function sendNotification(title, message) {
   if ('Notification' in window && Notification.permission === 'granted') {
     new Notification(title, {
@@ -143,7 +396,7 @@ function sendNotification(title, message) {
   }
 }
 
-// Play notification sound
+// --- Sound Synthesizer ---
 let audioCtx = null;
 function playBellSound() {
   try {
@@ -156,7 +409,6 @@ function playBellSound() {
       audioCtx.resume();
     }
     
-    // Play double bell sequence
     const playNote = (time, freq, duration) => {
       const osc = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
@@ -176,29 +428,25 @@ function playBellSound() {
     };
     
     const now = audioCtx.currentTime;
-    // First chime (E5 note - 659.25Hz)
     playNote(now, 659.25, 0.6);
-    // Second chime (A5 note - 880Hz)
     playNote(now + 0.25, 880, 0.8);
   } catch (e) {
-    console.error('Failed to play synthesized sound:', e);
+    console.error('Failed to play sound:', e);
   }
 }
 
-// Update the circular progress ring
+// --- Timer Display & Calculations ---
 function setProgress(percent) {
   const offset = CIRCUMFERENCE - (percent / 100) * CIRCUMFERENCE;
   progressCircle.style.strokeDashoffset = offset;
 }
 
-// Format seconds into MM:SS
 function formatTime(seconds) {
   const m = Math.floor(seconds / 60).toString().padStart(2, '0');
   const s = (seconds % 60).toString().padStart(2, '0');
   return `${m}:${s}`;
 }
 
-// Generate the visual dot indicators for target pomodoros
 function renderDots() {
   dotsGrid.innerHTML = '';
   for (let i = 1; i <= targetPomodoros; i++) {
@@ -218,7 +466,6 @@ function renderDots() {
   statsSummary.innerText = `Completed: ${completedPomodoros} / ${targetPomodoros} pomodoros`;
 }
 
-// Update the display of the timer
 function updateDisplay() {
   timeDisplay.innerText = formatTime(secondsRemaining);
   
@@ -251,7 +498,17 @@ function updateDisplay() {
     statusDisplay.innerText = 'Resting...';
   }
 
-  // Play/Pause button text and style
+  // Active Task Display in Timer Tab
+  const activeTask = tasks.find(t => t.id === activeTaskId);
+  if (activeTask) {
+    activeTaskDisplay.innerText = `${activeTask.title} (${activeTask.completed}/${activeTask.estimated} 🍅)`;
+    activeTaskDisplay.className = `active-task-title ${timerState === 'focus' ? 'active-focus' : (timerState === 'break' ? 'active-break' : '')}`;
+  } else {
+    activeTaskDisplay.innerText = 'No task selected';
+    activeTaskDisplay.className = 'active-task-title';
+  }
+
+  // Play/Pause button text
   if (timerState === 'focus' || timerState === 'break') {
     playPauseBtn.innerHTML = '<span class="btn-icon">⏸</span> Pause';
   } else {
@@ -259,7 +516,7 @@ function updateDisplay() {
   }
 }
 
-// Stop the timer loop
+// --- Timer Loop Actions ---
 function stopTimerInterval() {
   if (timerInterval) {
     clearInterval(timerInterval);
@@ -267,22 +524,18 @@ function stopTimerInterval() {
   }
 }
 
-// Play or Pause actions
 function togglePlayPause() {
   if (timerState === 'idle') {
-    // Start focus session
     timerState = 'focus';
     totalDuration = config['work-duration'] * 60;
     secondsRemaining = totalDuration;
     endTime = Date.now() + secondsRemaining * 1000;
     startTimerLoop();
   } else if (timerState === 'paused') {
-    // Resume session
     timerState = secondsRemaining > 0 && totalDuration === config['break-duration'] * 60 ? 'break' : 'focus';
     endTime = Date.now() + secondsRemaining * 1000;
     startTimerLoop();
   } else if (timerState === 'focus' || timerState === 'break') {
-    // Pause session
     timerState = 'paused';
     pausedRemainingSeconds = secondsRemaining;
     stopTimerInterval();
@@ -292,7 +545,6 @@ function togglePlayPause() {
   renderDots();
 }
 
-// Timer tick loop
 function startTimerLoop() {
   stopTimerInterval();
   
@@ -307,10 +559,26 @@ function startTimerLoop() {
       secondsRemaining = 0;
       handleSessionComplete();
     }
-  }, 200); // Check 5 times per second for smooth updates and precision
+  }, 200);
 }
 
-// Handle completion of a work or break session
+function logSession(type, status, duration) {
+  const activeTask = tasks.find(t => t.id === activeTaskId);
+  const taskTitle = activeTask ? activeTask.title : 'Focus Session';
+  
+  const newSession = {
+    id: 'sess-' + Math.random().toString(36).substr(2, 9) + '-' + Date.now().toString(36),
+    type,
+    status,
+    timestamp: Date.now(),
+    duration,
+    taskTitle
+  };
+  
+  sessions.push(newSession);
+  saveSessionsToFile();
+}
+
 function handleSessionComplete() {
   stopTimerInterval();
   playBellSound();
@@ -318,9 +586,19 @@ function handleSessionComplete() {
   if (timerState === 'focus') {
     completedPomodoros++;
     
+    // Increment active task pomodoro completed count
+    const activeTask = tasks.find(t => t.id === activeTaskId);
+    if (activeTask) {
+      activeTask.completed++;
+      saveTasksToFile();
+      renderTaskList();
+    }
+    
+    // Log the completed focus session
+    logSession('focus', 'completed', totalDuration);
+    
     sendNotification('🍅 Time to rest!', 'Great job! You have completed a work session. Time for a short break.');
     
-    // Switch to break
     timerState = 'break';
     totalDuration = config['break-duration'] * 60;
     secondsRemaining = totalDuration;
@@ -329,7 +607,6 @@ function handleSessionComplete() {
   } else if (timerState === 'break') {
     sendNotification('💪 Back to work!', 'Break is over. Ready to focus again?');
     
-    // Switch back to idle/ready
     timerState = 'idle';
     setProgress(100);
   }
@@ -339,9 +616,16 @@ function handleSessionComplete() {
   renderDots();
 }
 
-// Reset the timer to default state
 function resetTimer() {
   stopTimerInterval();
+  
+  // Log skipped if resetting an active focus session after at least 10 seconds
+  const isFocus = timerState === 'focus' || (timerState === 'paused' && totalDuration === config['work-duration'] * 60);
+  const elapsed = totalDuration - secondsRemaining;
+  if (isFocus && elapsed >= 10) {
+    logSession('focus', 'skipped', elapsed);
+  }
+  
   timerState = 'idle';
   totalDuration = config['work-duration'] * 60;
   secondsRemaining = totalDuration;
@@ -353,18 +637,29 @@ function resetTimer() {
   renderDots();
 }
 
-// Skip the current session
 function skipSession() {
   stopTimerInterval();
-  if (timerState === 'focus') {
-    // Skip work straight to break
+  const isFocus = timerState === 'focus' || (timerState === 'paused' && totalDuration === config['work-duration'] * 60);
+  
+  if (isFocus) {
+    // If skipping focus, we still increment active task pomodoro
+    const activeTask = tasks.find(t => t.id === activeTaskId);
+    if (activeTask) {
+      activeTask.completed++;
+      saveTasksToFile();
+      renderTaskList();
+    }
+    completedPomodoros++;
+    
+    const elapsed = totalDuration - secondsRemaining;
+    logSession('focus', 'skipped', elapsed);
+    
     timerState = 'break';
     totalDuration = config['break-duration'] * 60;
     secondsRemaining = totalDuration;
     endTime = Date.now() + secondsRemaining * 1000;
     startTimerLoop();
-  } else if (timerState === 'break' || timerState === 'paused' || timerState === 'idle') {
-    // Skip break/paused back to idle
+  } else {
     timerState = 'idle';
     endTime = 0;
     pausedRemainingSeconds = 0;
@@ -375,7 +670,7 @@ function skipSession() {
   renderDots();
 }
 
-// Adjust daily target pomodoros
+// --- Target Pomodoros Adjustment ---
 async function adjustTarget(amount) {
   const newTarget = Math.max(1, Math.min(10, targetPomodoros + amount));
   if (newTarget !== targetPomodoros) {
@@ -384,7 +679,6 @@ async function adjustTarget(amount) {
     renderDots();
     saveLocalState();
     
-    // Update and write settings back to Seelen UI
     if (seelenSettings) {
       if (!seelenSettings.inner.byWidget) {
         seelenSettings.inner.byWidget = {};
@@ -402,7 +696,7 @@ async function adjustTarget(amount) {
   }
 }
 
-// Read settings values and apply to timer duration
+// --- Seelen Settings Mapping ---
 function applyConfig(newConfig) {
   if (!newConfig) return;
   
@@ -414,12 +708,10 @@ function applyConfig(newConfig) {
   targetPomodoros = config['target-pomodoros'] || 8;
   targetCountEl.innerText = targetPomodoros;
 
-  // If timer is idle, update the durations
   if (timerState === 'idle') {
     secondsRemaining = config['work-duration'] * 60;
     totalDuration = secondsRemaining;
   } else if (timerState === 'paused') {
-    // If durations changed while paused, adjust remaining seconds
     if (oldWork !== config['work-duration'] && totalDuration === oldWork * 60) {
       const ratio = secondsRemaining / (oldWork * 60);
       totalDuration = config['work-duration'] * 60;
@@ -432,7 +724,6 @@ function applyConfig(newConfig) {
       pausedRemainingSeconds = secondsRemaining;
     }
   } else if (timerState === 'focus' || timerState === 'break') {
-    // If durations changed while running, adjust endTime dynamically
     const currentPassed = totalDuration - secondsRemaining;
     if (timerState === 'focus' && oldWork !== config['work-duration']) {
       totalDuration = config['work-duration'] * 60;
@@ -450,38 +741,199 @@ function applyConfig(newConfig) {
   renderDots();
 }
 
-// Fetch Seelen UI config on startup
+function updateAnalyticsAndRender() {
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const startOfTodayMs = startOfToday.getTime();
+
+  // 1. Calculate stats
+  // Focus Time today (completed only)
+  const todayCompletedFocus = sessions.filter(s => 
+    s.type === 'focus' && 
+    s.status === 'completed' && 
+    s.timestamp >= startOfTodayMs
+  );
+  
+  const todayFocusSec = todayCompletedFocus.reduce((sum, s) => sum + s.duration, 0);
+  const todayFocusMin = Math.round(todayFocusSec / 60);
+  
+  let timeStr = '0м';
+  if (todayFocusMin >= 60) {
+    const hrs = Math.floor(todayFocusMin / 60);
+    const mins = todayFocusMin % 60;
+    timeStr = `${hrs}ч ${mins}м`;
+  } else if (todayFocusMin > 0) {
+    timeStr = `${todayFocusMin}м`;
+  }
+  statFocusTime.innerText = timeStr;
+
+  // Completed sessions today
+  statCompletedSessions.innerText = todayCompletedFocus.length;
+
+  // Success Rate (all time)
+  const allFocus = sessions.filter(s => s.type === 'focus');
+  const completedAll = allFocus.filter(s => s.status === 'completed').length;
+  const skippedAll = allFocus.filter(s => s.status === 'skipped').length;
+  const totalAll = completedAll + skippedAll;
+  const rate = totalAll > 0 ? Math.round((completedAll / totalAll) * 100) : 100;
+  statSuccessRate.innerText = `${rate}%`;
+
+  // 2. Render Weekly Chart
+  weeklyBarChart.innerHTML = '';
+  const ruDays = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+  const chartData = [];
+  
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    d.setHours(0, 0, 0, 0);
+    const dayLabel = ruDays[d.getDay()];
+    
+    const nextDayMs = d.getTime() + 24 * 60 * 60 * 1000;
+    const daySessions = sessions.filter(s => 
+      s.type === 'focus' && 
+      s.status === 'completed' && 
+      s.timestamp >= d.getTime() && 
+      s.timestamp < nextDayMs
+    );
+    const dayFocusMinutes = Math.round(daySessions.reduce((sum, s) => sum + s.duration, 0) / 60);
+    chartData.push({ dayLabel, minutes: dayFocusMinutes });
+  }
+
+  const maxMinutes = Math.max(60, ...chartData.map(d => d.minutes));
+
+  chartData.forEach(data => {
+    const heightPercent = Math.max(2, Math.round((data.minutes / maxMinutes) * 100));
+    
+    const barWrapper = document.createElement('div');
+    barWrapper.className = 'chart-bar-wrapper';
+    
+    const bar = document.createElement('div');
+    bar.className = 'chart-bar';
+    bar.style.height = `${heightPercent}%`;
+    
+    let tooltipText = '';
+    if (data.minutes >= 60) {
+      const h = Math.floor(data.minutes / 60);
+      const m = data.minutes % 60;
+      tooltipText = `${h} ч ${m} мин`;
+    } else {
+      tooltipText = `${data.minutes} мин`;
+    }
+    bar.setAttribute('data-tooltip', tooltipText);
+    
+    const label = document.createElement('span');
+    label.className = 'chart-day-label';
+    label.innerText = data.dayLabel;
+    
+    barWrapper.appendChild(bar);
+    barWrapper.appendChild(label);
+    weeklyBarChart.appendChild(barWrapper);
+  });
+
+  // 3. Render Session Log List
+  sessionLogList.innerHTML = '';
+  if (sessions.length === 0) {
+    sessionLogList.innerHTML = '<div style="text-align:center;font-size:11px;color:var(--text-secondary);padding:20px 0;">Лог пуст. Завершите сессию!</div>';
+    return;
+  }
+
+  const recentSessions = [...sessions]
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, 15);
+
+  recentSessions.forEach(session => {
+    const item = document.createElement('div');
+    item.className = 'log-item';
+    
+    const left = document.createElement('div');
+    left.className = 'log-item-left';
+    
+    const indicator = document.createElement('span');
+    indicator.className = 'log-status-indicator';
+    indicator.innerText = session.status === 'completed' ? '🍅' : '⚠️';
+    
+    const title = document.createElement('span');
+    title.className = 'log-task-title';
+    title.innerText = session.taskTitle;
+    title.title = session.taskTitle;
+    
+    left.appendChild(indicator);
+    left.appendChild(title);
+    
+    const right = document.createElement('div');
+    right.className = 'log-item-right';
+    
+    const duration = document.createElement('span');
+    duration.className = 'log-duration';
+    const durMin = Math.round(session.duration / 60);
+    duration.innerText = `${durMin > 0 ? durMin : '<1'}м`;
+    
+    const time = document.createElement('span');
+    time.className = 'log-time';
+    const timeStr = new Date(session.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    time.innerText = timeStr;
+    
+    right.appendChild(duration);
+    right.appendChild(time);
+    
+    item.appendChild(left);
+    item.appendChild(right);
+    
+    sessionLogList.appendChild(item);
+  });
+}
+
 async function setupSeelenSettings() {
   try {
     seelenSettings = await Settings.getAsync();
     
-    // Listen for real-time setting updates from Seelen UI settings panel
     Settings.onChange((newSettings) => {
       seelenSettings = newSettings;
       const newConfig = seelenSettings.getCurrentWidgetConfig();
       applyConfig(newConfig);
     });
 
-    // Apply initial settings
     const initialConfig = seelenSettings.getCurrentWidgetConfig();
     config = { ...config, ...initialConfig };
     targetPomodoros = config['target-pomodoros'] || 8;
     targetCountEl.innerText = targetPomodoros;
     
-    // Load local state (restoring running timer status if it exists)
+    await loadTasksFromFile();
+    await loadSessionsFromFile();
+    renderTaskList();
+    
     loadLocalState();
   } catch (e) {
     console.error('Could not connect to Seelen UI settings API, using offline config.', e);
+    await loadTasksFromFile();
+    await loadSessionsFromFile();
+    renderTaskList();
     loadLocalState();
   }
 }
 
-// Set up UI Event Listeners
+// --- UI Event Listeners ---
 playPauseBtn.addEventListener('click', togglePlayPause);
 resetBtn.addEventListener('click', resetTimer);
 skipBtn.addEventListener('click', skipSession);
 targetMinusBtn.addEventListener('click', () => adjustTarget(-1));
 targetPlusBtn.addEventListener('click', () => adjustTarget(1));
+
+estMinusBtn.addEventListener('click', () => adjustFormEstimate(-1));
+estPlusBtn.addEventListener('click', () => adjustFormEstimate(1));
+addTaskBtn.addEventListener('click', addTask);
+taskInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') addTask();
+});
+
+clearLogBtn.addEventListener('click', async () => {
+  if (confirm('Очистить всю историю сессий и аналитику?')) {
+    sessions = [];
+    await saveSessionsToFile();
+    updateAnalyticsAndRender();
+  }
+});
 
 // Initialize State and Settings
 setupSeelenSettings();

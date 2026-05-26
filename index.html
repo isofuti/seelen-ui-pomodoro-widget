@@ -7,57 +7,130 @@
   </head>
   <body>
     <div id="app" class="pomodoro-app">
-      <!-- Header -->
-      <div class="pomodoro-header">
-        <span class="pomodoro-title">
-          <span class="tomato-icon">🍅</span> Pomodoro
-        </span>
-        <span class="pomodoro-state-badge" id="state-badge">Focus</span>
+      <!-- Tab Navigation -->
+      <div class="tab-navigation">
+        <button class="tab-btn active" id="tab-timer-btn">⏱ Timer</button>
+        <button class="tab-btn" id="tab-tasks-btn">📋 Tasks</button>
+        <button class="tab-btn" id="tab-stats-btn">📊 Stats</button>
       </div>
 
-      <!-- Main Circular Timer Section -->
-      <div class="timer-container">
-        <svg class="progress-ring" width="160" height="160">
-          <circle
-            class="progress-ring__circle-bg"
-            stroke="rgba(255, 255, 255, 0.08)"
-            stroke-width="8"
-            fill="transparent"
-            r="70"
-            cx="80"
-            cy="80"
-          />
-          <circle
-            class="progress-ring__circle"
-            id="progress-circle"
-            stroke="#ff5e57"
-            stroke-width="8"
-            fill="transparent"
-            r="70"
-            cx="80"
-            cy="80"
-          />
-        </svg>
-        <div class="timer-display">
-          <div class="time-left" id="time-display">25:00</div>
-          <div class="timer-status" id="status-display">Ready</div>
+      <!-- Tab 1: Timer Content -->
+      <div id="timer-tab-content" class="tab-content active">
+        <div class="pomodoro-header">
+          <span class="pomodoro-title">
+            <span class="tomato-icon">🍅</span> Focus Session
+          </span>
+          <span class="pomodoro-state-badge" id="state-badge">Focus</span>
+        </div>
+
+        <!-- Main Circular Timer Section -->
+        <div class="timer-container">
+          <svg class="progress-ring" width="160" height="160">
+            <circle
+              class="progress-ring__circle-bg"
+              stroke="rgba(255, 255, 255, 0.08)"
+              stroke-width="8"
+              fill="transparent"
+              r="70"
+              cx="80"
+              cy="80"
+            />
+            <circle
+              class="progress-ring__circle"
+              id="progress-circle"
+              stroke="#ff5e57"
+              stroke-width="8"
+              fill="transparent"
+              r="70"
+              cx="80"
+              cy="80"
+            />
+          </svg>
+          <div class="timer-display">
+            <div class="time-left" id="time-display">25:00</div>
+            <div class="timer-status" id="status-display">Ready</div>
+          </div>
+        </div>
+
+        <!-- Active Task Display -->
+        <div class="active-task-container">
+          <div class="active-task-label">Active Task</div>
+          <div class="active-task-title" id="active-task-display">No task selected</div>
+        </div>
+
+        <!-- Controls -->
+        <div class="controls-container">
+          <button class="control-btn play-btn" id="play-pause-btn" title="Start">
+            <span class="btn-icon">▶</span> Start
+          </button>
+          <button class="control-btn reset-btn" id="reset-btn" title="Reset">
+            <span class="btn-icon">↺</span> Reset
+          </button>
+          <button class="control-btn skip-btn" id="skip-btn" title="Skip">
+            <span class="btn-icon">⏭</span> Skip
+          </button>
         </div>
       </div>
 
-      <!-- Controls -->
-      <div class="controls-container">
-        <button class="control-btn play-btn" id="play-pause-btn" title="Start">
-          <span class="btn-icon">▶</span> Start
-        </button>
-        <button class="control-btn reset-btn" id="reset-btn" title="Reset">
-          <span class="btn-icon">↺</span> Reset
-        </button>
-        <button class="control-btn skip-btn" id="skip-btn" title="Skip">
-          <span class="btn-icon">⏭</span> Skip
-        </button>
+      <!-- Tab 2: Tasks Content -->
+      <div id="tasks-tab-content" class="tab-content">
+        <div class="add-task-form">
+          <input type="text" id="task-input" placeholder="What are you working on?" maxlength="100" />
+          <div class="form-row">
+            <div class="estimate-input-container">
+              <span class="est-label">Estimate:</span>
+              <button class="est-btn" id="est-minus" type="button">-</button>
+              <span class="est-value" id="est-count">1</span>
+              <button class="est-btn" id="est-plus" type="button">+</button>
+              <span class="est-tomato">🍅</span>
+            </div>
+            <button class="add-btn" id="add-task-btn">Add</button>
+          </div>
+        </div>
+
+        <!-- Scrollable Task List -->
+        <div class="task-list-container" id="task-list">
+          <!-- Tasks will be dynamically rendered here -->
+        </div>
       </div>
 
-      <!-- Target/Statistics Section -->
+      <!-- Tab 3: Stats Content -->
+      <div id="stats-tab-content" class="tab-content">
+        <!-- Analytics Summary Cards Grid -->
+        <div class="analytics-grid">
+          <div class="anal-card">
+            <div class="anal-value" id="stat-focus-time">0m</div>
+            <div class="anal-label">Focus Time</div>
+          </div>
+          <div class="anal-card">
+            <div class="anal-value" id="stat-completed-sessions">0</div>
+            <div class="anal-label">Completed</div>
+          </div>
+          <div class="anal-card">
+            <div class="anal-value" id="stat-success-rate">0%</div>
+            <div class="anal-label">Success Rate</div>
+          </div>
+        </div>
+
+        <!-- Weekly Activity Chart -->
+        <div class="weekly-chart-container">
+          <div class="chart-header">Weekly Focus</div>
+          <div class="bar-chart" id="weekly-bar-chart">
+            <!-- 7 bars will be dynamically rendered by JS -->
+          </div>
+        </div>
+
+        <!-- Session Log -->
+        <div class="session-log-container">
+          <div class="log-header">Session Log</div>
+          <div class="log-list" id="session-log-list">
+            <!-- Logs will be dynamically rendered by JS -->
+          </div>
+          <button class="clear-log-btn" id="clear-log-btn">Clear History</button>
+        </div>
+      </div>
+
+      <!-- Bottom Target/Statistics Section (Shared) -->
       <div class="stats-container">
         <div class="stats-header">
           <span class="stats-label">Daily Target</span>
